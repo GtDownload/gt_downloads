@@ -1,12 +1,13 @@
 import time
 import re
 import uuid
-import traceback
-import shutil
 import tempfile
+import shutil
 from pathlib import Path
 from urllib.parse import quote, urlparse, parse_qs
 from datetime import timedelta
+import ipaddress
+import socket
 
 import requests
 import yt_dlp
@@ -34,6 +35,27 @@ REQUESTED_QUALITIES = {
     "hd": 720,
 }
 
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
+PLATFORM_REFERERS = {
+    "tiktok": "https://www.tiktok.com/",
+    "facebook": "https://www.facebook.com/",
+    "twitter": "https://x.com/",
+    "instagram": "https://www.instagram.com/",
+    "youtube": "https://www.youtube.com/",
+}
+
+LOG_STATUS_MAP = {
+    "success": "SUCCESS",
+    "success_cached": "SUCCESS",
+    "failed": "FAILED",
+    "pending": "PENDING",
+}
+
 def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
@@ -58,16 +80,33 @@ class BaseExtractorView(APIView):
                 return f"https://www.youtube.com/watch?v={video_id}"
         return raw_url
 
+    def get_cookie_file(self) -> str | None:
+        value = getattr(settings, "YTDLP_COOKIE_FILE", None)
+        if not value:
+            return None
+        path = os.path.expanduser(str(value))
+        if os.path.isfile(path):
+            return path
+        # Fallback check relative to BASE_DIR if relative path was specified
+        base_dir_path = os.path.join(settings.BASE_DIR, value)
+        if os.path.isfile(base_dir_path):
+            return base_dir_path
+        return None
+
     def log_request(self, original_url: str, log_status: str, duration: float):
-        log_data = {
-            "platform": self.platform_name,
-            "original_url": original_url,
-            "status": log_status,
-            "request_duration": duration,
-        }
-        serializer = DownloadLogSerializer(data=log_data)
-        if serializer.is_valid():
-            serializer.save()
+        try:
+            serializer = DownloadLogSerializer(data={
+                "platform": self.platform_name,
+                "original_url": original_url,
+                "status": LOG_STATUS_MAP.get(log_status, "PENDING"),
+                "request_duration": duration,
+            })
+            if serializer.is_valid():
+                serializer.save()
+            else:
+                print("DownloadLog Validation Error:", serializer.errors)
+        except Exception as e:
+            print("DownloadLog Exception:", e)
 
     def build_proxy_url(self, request, direct_url: str, platform: str, http_headers=None) -> str:
         proxy_token = uuid.uuid4().hex
@@ -80,23 +119,27 @@ class BaseExtractorView(APIView):
 
         cache.set(f"video_proxy:{proxy_token}", proxy_data, timeout=600)
 
-        proxy_path = reverse("proxy-download")
+        try:
+            proxy_path = reverse("proxy-download")
+        except Exception:
+            proxy_path = "/api/proxy-download/"
+
         return request.build_absolute_uri(f"{proxy_path}?token={proxy_token}")
 
     def get_ydl_options(self) -> dict:
-        return {
+        opts = {
             "skip_download": True,
             "quiet": True,
             "no_warnings": True,
             "allow_playlist_files": False,
             "http_headers": {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
-                )
+                "User-Agent": USER_AGENT,
             },
         }
+        cookie_file = self.get_cookie_file()
+        if cookie_file:
+            opts["cookiefile"] = cookie_file
+        return opts
 
     def select_best_format(self, formats, target_height=None):
         best_format = None
@@ -178,7 +221,6 @@ class BaseExtractorView(APIView):
         # ========== CACHING (12 hours expiration) ==========
         cached_item = CachedMedia.objects.filter(
             url_hash=url_hash,
-            resolution=requested_resolution,
             expires_at__gt=timezone.now(),
         ).first()
 
@@ -225,7 +267,6 @@ class BaseExtractorView(APIView):
             return Response({
                 "error": f"Failed to extract video from {self.platform_name.title()}",
                 "details": str(e).strip() or type(e).__name__,
-                "traceback": traceback.format_exc()[-2000:],
             }, status=status.HTTP_400_BAD_REQUEST)
 
         request_duration = round(time.time() - start_time, 3)
@@ -265,22 +306,19 @@ class BaseExtractorView(APIView):
             http_headers=format_headers,
         )
 
-        # Save to cache with 12 hours expiration
-        cache_payload = {
-            "url_hash": url_hash,
-            "platform": self.platform_name,
-            "original_url": target_url,
-            "title": title[:250],
-            "thumbnail_url": thumbnail,
-            "direct_download_url": raw_cdn_url,
-            "duration": duration,
-            "resolution": actual_resolution,
-            "expires_at": timezone.now() + timedelta(hours=12),
-        }
-
-        cache_serializer = CachedMediaSerializer(data=cache_payload)
-        if cache_serializer.is_valid():
-            cache_serializer.save()
+        # Save to database cache with 12 hours expiration
+        CachedMedia.objects.update_or_create(
+            url_hash=url_hash,
+            defaults={
+                "platform": self.platform_name,
+                "original_url": target_url,
+                "title": title[:500],
+                "thumbnail_url": thumbnail,
+                "direct_download_url": raw_cdn_url,
+                "duration": duration,
+                "expires_at": timezone.now() + timedelta(hours=12),
+            },
+        )
 
         return Response({
             "url_hash": url_hash,
@@ -310,8 +348,8 @@ class TikTokExtractorView(BaseExtractorView):
             "geo_bypass": True,
             "geo_bypass_country": "US",
             "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                "Referer": "https://www.tiktok.com/",
+                "User-Agent": USER_AGENT,
+                "Referer": PLATFORM_REFERERS["tiktok"],
                 "Accept-Language": "en-US,en;q=0.9",
             },
         })
@@ -350,6 +388,7 @@ class TwitterExtractorView(BaseExtractorView):
         })
         return opts
     
+
 class YoutubeExtractorView(BaseExtractorView):
     platform_name = "youtube"
 
@@ -399,11 +438,7 @@ class MergedDownloadView(APIView):
             "outtmpl": output_template,
             "impersonate": ImpersonateTarget.from_str("chrome"),
             "http_headers": {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
-                ),
+                "User-Agent": USER_AGENT,
                 "Referer": "https://www.youtube.com/",
             },
             "extractor_args": {
@@ -413,11 +448,9 @@ class MergedDownloadView(APIView):
             },
         }
 
-        cookie_file = getattr(settings, "YTDLP_COOKIE_FILE", None)
+        cookie_file = BaseExtractorView().get_cookie_file()
         if cookie_file:
-            cookie_path = os.path.expanduser(str(cookie_file))
-            if os.path.isfile(cookie_path):
-                ydl_opts["cookiefile"] = cookie_path
+            ydl_opts["cookiefile"] = cookie_file
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -477,11 +510,7 @@ class ProxyDownloadView(APIView):
         extra_headers = proxy_data.get("headers") or {}
 
         headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
+            "User-Agent": USER_AGENT,
             "Accept": "*/*",
             "Accept-Language": "en-US,en;q=0.9",
             "Accept-Encoding": "identity",
