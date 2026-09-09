@@ -403,7 +403,7 @@ class YoutubeExtractorView(BaseExtractorView):
             "merge_output_format": "mp4",
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["ios", "android", "mweb"],
+                    "player_client": ["default"],
                 }
             },
         })
@@ -441,17 +441,28 @@ class MergedDownloadView(APIView):
             "http_headers": {
                 "User-Agent": USER_AGENT,
                 "Referer": "https://www.youtube.com/",
+                "Accept-Language": "en-US,en;q=0.9",
             },
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["ios", "android", "mweb"],
+                    "player_client": ["default"],
                 }
             },
         }
 
+        # Optional authentication/cookies configured through Django settings.
         cookie_file = BaseExtractorView().get_cookie_file()
         if cookie_file:
             ydl_opts["cookiefile"] = cookie_file
+            print("yt-dlp: using cookie file:", cookie_file)
+        else:
+            print("yt-dlp: no cookie file configured")
+
+        # Optional PO token. YouTube increasingly requires PO tokens for
+        # some clients/formats. Set YTDLP_PO_TOKEN in Render when available.
+        po_token = getattr(settings, "YTDLP_PO_TOKEN", None)
+        if po_token:
+            ydl_opts["extractor_args"]["youtube"]["po_token"] = po_token
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -490,7 +501,21 @@ class MergedDownloadView(APIView):
 
         except Exception as exc:
             shutil.rmtree(temp_dir, ignore_errors=True)
-            return HttpResponse(f"Error processing video stream: {exc}", status=500)
+
+            error_text = str(exc).strip() or type(exc).__name__
+
+            if "Sign in to confirm you're not a bot" in error_text:
+                return HttpResponse(
+                    "YouTube blocked this server request. "
+                    "Configure a valid YTDLP_COOKIE_FILE and, when required, "
+                    "a current YTDLP_PO_TOKEN/PO-token provider on the server.",
+                    status=503,
+                )
+
+            return HttpResponse(
+                f"Error processing video stream: {error_text}",
+                status=500,
+            )
     
     
 # ================================================================
