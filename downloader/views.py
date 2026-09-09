@@ -8,7 +8,7 @@ from urllib.parse import quote, urlparse, parse_qs
 from datetime import timedelta
 import ipaddress
 import socket
-
+import os
 import requests
 import yt_dlp
 from yt_dlp.networking.impersonate import ImpersonateTarget
@@ -87,10 +87,11 @@ class BaseExtractorView(APIView):
         path = os.path.expanduser(str(value))
         if os.path.isfile(path):
             return path
-        # Fallback check relative to BASE_DIR if relative path was specified
+        
         base_dir_path = os.path.join(settings.BASE_DIR, value)
         if os.path.isfile(base_dir_path):
             return base_dir_path
+        
         return None
 
     def log_request(self, original_url: str, log_status: str, duration: float):
