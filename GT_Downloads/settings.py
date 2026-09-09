@@ -25,7 +25,11 @@ SECRET_KEY = 'django-insecure-=r1gv&^%c4q4n!i2)rpvf)ne=cn=etn&7-d!my^l_ov($u0w3z
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [
+    "gt-downloads.onrender.com",
+    "localhost",
+    "127.0.0.1",
+]
 
 
 # Application definition
