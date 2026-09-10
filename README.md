@@ -70,6 +70,13 @@ All platform extraction endpoints accept an HTTP `POST` request with a JSON payl
 	]
 }
 ```
+<<<<<<< HEAD
+=======
+
+
+2. Utility & Processing Endpoints
+Proxy Download (GET /api/proxy-download/)
+>>>>>>> 758a433e9ee1967827bcd4cb3102a7d1bbe39e93
 
 ### 2. Utility & Processing Endpoints
 
@@ -87,6 +94,7 @@ All platform extraction endpoints accept an HTTP `POST` request with a JSON payl
 
 1. **Clone the Repository**
 
+<<<<<<< HEAD
 ```bash
 git clone [https://github.com/GtDownload/gt_downloads.git](https://github.com/GtDownload/gt_downloads.git)
 cd gt_downloads
@@ -125,4 +133,29 @@ python manage.py runserver
 
 ```
 
+=======
+```Bash
+git clone [https://github.com/GtDownload/gt_downloads.git](https://github.com/GtDownload/gt_downloads.git)
+cd gt_downloads
+Create & Activate a Virtual Environment
+```
+
+
+```Bash
+python -m venv .venv
+source .venv/bin/activate  # On Windows use: .venv\Scripts\activate
+Install Dependencies
+```
+```Bash
+pip install -r requirements.txt
+Apply Database Migrations
+```
+```Bash
+python manage.py makemigrations
+python manage.py migrate
+Run the Development Server
+```
+```Bash
+python manage.py runserver
+>>>>>>> 758a433e9ee1967827bcd4cb3102a7d1bbe39e93
 ```
