@@ -60,6 +60,9 @@ JSON
     }
   ]
 }
+```
+
+
 2. Utility & Processing Endpoints
 Proxy Download (GET /api/proxy-download/)
 
@@ -76,25 +79,27 @@ Query Parameters: url (target YouTube link) and quality (480 or hd).
 Local Installation & Setup
 Clone the Repository
 
-Bash
+```Bash
 git clone [https://github.com/GtDownload/gt_downloads.git](https://github.com/GtDownload/gt_downloads.git)
 cd gt_downloads
 Create & Activate a Virtual Environment
+```
 
-Bash
+
+```Bash
 python -m venv .venv
 source .venv/bin/activate  # On Windows use: .venv\Scripts\activate
 Install Dependencies
-
-Bash
+```
+```Bash
 pip install -r requirements.txt
 Apply Database Migrations
-
-Bash
+```
+```Bash
 python manage.py makemigrations
 python manage.py migrate
 Run the Development Server
-
-Bash
+```
+```Bash
 python manage.py runserver
 ```
