@@ -31,11 +31,11 @@ All platform extraction endpoints accept an HTTP `POST` request with a JSON payl
 
 | Endpoint Path               | Platform    | HTTP Method | Description                                                                   |
 | :-------------------------- | :---------- | :---------- | :---------------------------------------------------------------------------- |
-| `/api/extractor/tiktok/`    | TikTok      | POST        | Extracts TikTok media metadata and returns a proxied stream link.             |
-| `/api/extractor/instagram/` | Instagram   | POST        | Resolves direct Instagram media CDN links.                                    |
-| `/api/extractor/facebook/`  | Facebook    | POST        | Extracts public Facebook video streams.                                       |
-| `/api/extractor/twitter/`   | X / Twitter | POST        | Resolves media content embedded within tweets.                                |
-| `/api/extractor/youtube/`   | YouTube     | POST        | Routes YouTube links directly to the adaptive FFmpeg stream merging workflow. |
+| `/api/extract/tiktok/`    | TikTok      | POST        | Extracts TikTok media metadata and returns a proxied stream link.             |
+| `/api/extract/instagram/` | Instagram   | POST        | Resolves direct Instagram media CDN links.                                    |
+| `/api/extract/facebook/`  | Facebook    | POST        | Extracts public Facebook video streams.                                       |
+| `/api/extract/twitter/`   | X / Twitter | POST        | Resolves media content embedded within tweets.                                |
+| `/api/extract/youtube/`   | YouTube     | POST        | Routes YouTube links directly to the adaptive FFmpeg stream merging workflow. |
 
 #### **Request Body Schema**
 
