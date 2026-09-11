@@ -31,7 +31,7 @@ All platform extraction endpoints accept an HTTP `POST` request with a JSON payl
 ```json
 {
 	"url": "https://www.youtube.com/watch?v=EXAMPLE_ID",
-	"resolution": 720
+	
 }
 ```
 
