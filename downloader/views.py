@@ -1,34 +1,34 @@
-import time
-import re
-import uuid
-import tempfile
-import shutil
-from pathlib import Path
-from urllib.parse import quote, urlparse, parse_qs
-from datetime import timedelta
-import ipaddress
-import socket
+import hashlib
 import os
-import requests
-import yt_dlp
+import re
+import shutil
+import tempfile
+import time
+from datetime import timedelta
+from pathlib import Path
+from urllib.parse import parse_qs, quote, urlparse
 from yt_dlp.networking.impersonate import ImpersonateTarget
 
+import requests
+import yt_dlp
 from django.conf import settings
-from django.utils import timezone
-from django.http import StreamingHttpResponse, HttpResponse, FileResponse
+from django.http import FileResponse, HttpResponse, StreamingHttpResponse
 from django.urls import reverse
-from django.core.cache import cache
-
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import CachedMedia, DownloadLog
 from .serializers import (
-    VideoRequestSerializer,
-    DownloadLogSerializer,
     CachedMediaSerializer,
+    DownloadLogSerializer,
+    VideoRequestSerializer,
 )
+
+# ---------------------------------------------------------------------------
+# GLOBAL CONFIG & MAPPINGS
+# ---------------------------------------------------------------------------
 
 REQUESTED_QUALITIES = {
     "480": 480,
@@ -56,8 +56,14 @@ LOG_STATUS_MAP = {
     "pending": "PENDING",
 }
 
+
+# ---------------------------------------------------------------------------
+# UTILITY HELPERS
+# ---------------------------------------------------------------------------
+
 def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
+
 
 def safe_filename(title: str, fallback: str = "video") -> str:
     title = str(title or "").strip()
@@ -67,6 +73,16 @@ def safe_filename(title: str, fallback: str = "video") -> str:
     title = title.rstrip(". ")
     return (title or fallback)[:150]
 
+
+def forward_format_headers(fmt: dict) -> dict:
+    headers = fmt.get("http_headers") or {}
+    allowed = {"Referer", "User-Agent", "Origin", "Cookie"}
+    return {k: v for k, v in headers.items() if k in allowed and v}
+
+
+# ---------------------------------------------------------------------------
+# BASE EXTRACTOR VIEW
+# ---------------------------------------------------------------------------
 
 class BaseExtractorView(APIView):
     platform_name = "unknown"
@@ -87,11 +103,9 @@ class BaseExtractorView(APIView):
         path = os.path.expanduser(str(value))
         if os.path.isfile(path):
             return path
-        
         base_dir_path = os.path.join(settings.BASE_DIR, value)
         if os.path.isfile(base_dir_path):
             return base_dir_path
-        
         return None
 
     def log_request(self, original_url: str, log_status: str, duration: float):
@@ -110,7 +124,7 @@ class BaseExtractorView(APIView):
             print("DownloadLog Exception:", e)
 
     def build_proxy_url(self, request, direct_url: str, platform: str, http_headers=None) -> str:
-        proxy_token = uuid.uuid4().hex
+        proxy_token = hashlib.sha256(f"{direct_url}-{time.time()}".encode()).hexdigest()[:32]
 
         proxy_data = {
             "url": direct_url,
@@ -118,6 +132,7 @@ class BaseExtractorView(APIView):
             "headers": http_headers or {},
         }
 
+        from django.core.cache import cache
         cache.set(f"video_proxy:{proxy_token}", proxy_data, timeout=600)
 
         try:
@@ -191,8 +206,65 @@ class BaseExtractorView(APIView):
         url_hash = req_serializer.get_url_hash()
         requested_resolution = req_serializer.validated_data.get("resolution", 720)
 
-        # YouTube Handling via Merged Download View
+        # ========== CACHING (12 hours expiration) ==========
+        cached_item = CachedMedia.objects.filter(
+            url_hash=url_hash,
+            expires_at__gt=timezone.now(),
+        ).first()
+
+        if cached_item:
+            request_duration = round(time.time() - start_time, 3)
+            self.log_request(target_url, "success_cached", request_duration)
+
+            cached_data = CachedMediaSerializer(cached_item).data
+
+            # If it's YouTube, route to merged download, else use proxy url
+            if cached_data["platform"] == "youtube":
+                try:
+                    merge_path = reverse("merged-download")
+                except Exception:
+                    merge_path = "/api/merged-download/"
+                quality_key = "480" if requested_resolution <= 480 else "hd"
+                encoded_url = quote(target_url, safe="")
+                download_url = request.build_absolute_uri(f"{merge_path}?url={encoded_url}&quality={quality_key}")
+            else:
+                download_url = self.build_proxy_url(
+                    request,
+                    cached_data["direct_download_url"],
+                    cached_data["platform"],
+                )
+
+            resolution_label = (
+                f"{cached_data.get('resolution')}p"
+                if cached_data.get("resolution")
+                else f"{requested_resolution}p"
+            )
+
+            return Response({
+                "url_hash": cached_data["url_hash"],
+                "platform": cached_data["platform"],
+                "original_url": cached_data["original_url"],
+                "title": cached_data["title"],
+                "thumbnail_url": cached_data["thumbnail_url"],
+                "duration": cached_data["duration"],
+                "resolution": resolution_label,
+                "cached": True,
+                "download_url": download_url,
+            })
+
+        # YouTube Handling: Extract real metadata via yt-dlp first before returning merge URL
         if self.platform_name == "youtube":
+            ydl_opts = self.get_ydl_options()
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(target_url, download=False)
+            except Exception:
+                info = {}
+
+            title = info.get("title") or "YouTube Video"
+            thumbnail = info.get("thumbnail") or info.get("url") or ""
+            duration = info.get("duration")
+
             try:
                 merge_path = reverse("merged-download")
             except Exception:
@@ -207,55 +279,36 @@ class BaseExtractorView(APIView):
             request_duration = round(time.time() - start_time, 3)
             self.log_request(target_url, "success", request_duration)
 
+            # Save YouTube info to database cache
+            try:
+                CachedMedia.objects.update_or_create(
+                    url_hash=url_hash,
+                    defaults={
+                        "platform": "youtube",
+                        "original_url": target_url,
+                        "title": title[:500],
+                        "thumbnail_url": thumbnail,
+                        "direct_download_url": merged_url,
+                        "duration": duration,
+                        "expires_at": timezone.now() + timedelta(hours=12),
+                    },
+                )
+            except Exception:
+                pass
+
             return Response({
                 "url_hash": url_hash,
                 "platform": "youtube",
                 "original_url": target_url,
-                "title": "YouTube Video",
-                "thumbnail_url": "",
-                "duration": None,
+                "title": title,
+                "thumbnail_url": thumbnail,
+                "duration": duration,
                 "resolution": f"{requested_resolution}p",
                 "cached": False,
                 "download_url": merged_url,
             })
 
-        # ========== CACHING (12 hours expiration) ==========
-        cached_item = CachedMedia.objects.filter(
-            url_hash=url_hash,
-            expires_at__gt=timezone.now(),
-        ).first()
-
-        if cached_item:
-            request_duration = round(time.time() - start_time, 3)
-            self.log_request(target_url, "success_cached", request_duration)
-
-            cached_data = CachedMediaSerializer(cached_item).data
-
-            proxied_download_url = self.build_proxy_url(
-                request,
-                cached_data["direct_download_url"],
-                cached_data["platform"],
-            )
-
-            resolution_label = (
-                f"{cached_data.get('resolution')}p"
-                if cached_data.get("resolution")
-                else "HD"
-            )
-
-            return Response({
-                "url_hash": cached_data["url_hash"],
-                "platform": cached_data["platform"],
-                "original_url": cached_data["original_url"],
-                "title": cached_data["title"],
-                "thumbnail_url": cached_data["thumbnail_url"],
-                "duration": cached_data["duration"],
-                "resolution": resolution_label,
-                "cached": True,
-                "download_url": proxied_download_url,
-            })
-
-        # ========== FRESH EXTRACTION ==========
+        # ========== FRESH EXTRACTION (Other Platforms) ==========
         ydl_opts = self.get_ydl_options()
 
         try:
@@ -308,18 +361,21 @@ class BaseExtractorView(APIView):
         )
 
         # Save to database cache with 12 hours expiration
-        CachedMedia.objects.update_or_create(
-            url_hash=url_hash,
-            defaults={
-                "platform": self.platform_name,
-                "original_url": target_url,
-                "title": title[:500],
-                "thumbnail_url": thumbnail,
-                "direct_download_url": raw_cdn_url,
-                "duration": duration,
-                "expires_at": timezone.now() + timedelta(hours=12),
-            },
-        )
+        try:
+            CachedMedia.objects.update_or_create(
+                url_hash=url_hash,
+                defaults={
+                    "platform": self.platform_name,
+                    "original_url": target_url,
+                    "title": title[:500],
+                    "thumbnail_url": thumbnail,
+                    "direct_download_url": raw_cdn_url,
+                    "duration": duration,
+                    "expires_at": timezone.now() + timedelta(hours=12),
+                },
+            )
+        except Exception:
+            pass
 
         return Response({
             "url_hash": url_hash,
@@ -403,7 +459,7 @@ class YoutubeExtractorView(BaseExtractorView):
             "merge_output_format": "mp4",
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["default"],
+                    "player_client": ["ios", "android", "mweb"],
                 }
             },
         })
@@ -441,28 +497,17 @@ class MergedDownloadView(APIView):
             "http_headers": {
                 "User-Agent": USER_AGENT,
                 "Referer": "https://www.youtube.com/",
-                "Accept-Language": "en-US,en;q=0.9",
             },
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["default"],
+                    "player_client": ["ios", "android", "mweb"],
                 }
             },
         }
 
-        # Optional authentication/cookies configured through Django settings.
         cookie_file = BaseExtractorView().get_cookie_file()
         if cookie_file:
             ydl_opts["cookiefile"] = cookie_file
-            print("yt-dlp: using cookie file:", cookie_file)
-        else:
-            print("yt-dlp: no cookie file configured")
-
-        # Optional PO token. YouTube increasingly requires PO tokens for
-        # some clients/formats. Set YTDLP_PO_TOKEN in Render when available.
-        po_token = getattr(settings, "YTDLP_PO_TOKEN", None)
-        if po_token:
-            ydl_opts["extractor_args"]["youtube"]["po_token"] = po_token
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -501,21 +546,7 @@ class MergedDownloadView(APIView):
 
         except Exception as exc:
             shutil.rmtree(temp_dir, ignore_errors=True)
-
-            error_text = str(exc).strip() or type(exc).__name__
-
-            if "Sign in to confirm you're not a bot" in error_text:
-                return HttpResponse(
-                    "YouTube blocked this server request. "
-                    "Configure a valid YTDLP_COOKIE_FILE and, when required, "
-                    "a current YTDLP_PO_TOKEN/PO-token provider on the server.",
-                    status=503,
-                )
-
-            return HttpResponse(
-                f"Error processing video stream: {error_text}",
-                status=500,
-            )
+            return HttpResponse(f"Error processing video stream: {exc}", status=500)
     
     
 # ================================================================
@@ -527,6 +558,7 @@ class ProxyDownloadView(APIView):
         if not token:
             return HttpResponse("Missing token parameter.", status=400)
 
+        from django.core.cache import cache
         proxy_data = cache.get(f"video_proxy:{token}")
         if not proxy_data:
             return HttpResponse("Invalid or expired token.", status=404)
