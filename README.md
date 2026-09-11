@@ -2,7 +2,7 @@ Here is the complete and correct `README.md` file containing your actual project
 
 You can copy and paste this directly into your repository's `README.md` file:
 
-````markdown
+
 # GT_Downloads API
 
 ## Overview
@@ -45,7 +45,7 @@ All platform extraction endpoints accept an HTTP `POST` request with a JSON payl
 	"resolution": 720
 }
 ```
-````
+
 
 #### **Successful Extraction Response (`200 OK`)**
 
