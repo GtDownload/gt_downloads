@@ -1,36 +1,25 @@
-Here is the complete and correct `README.md` file containing your actual project architecture, features, local setup steps, and the precise API endpoint routing (`/api/extractor/tiktok/`, etc.) matching your project configuration.
+# GT_Downloads API Documentation
 
-You can copy and paste this directly into your repository's `README.md` file:
-
-
-# GT_Downloads API
-
-## Overview
-
-GT_Downloads is a robust, multi-platform media downloader API built using Django and `yt-dlp`. It allows public users and frontend integrations to smoothly extract video streams, metadata, and thumbnails from YouTube, Instagram, X (Twitter), Facebook, and TikTok without requiring personal cookie configurations.
+This technical reference outlines the core endpoints, request payload structures, database caching architecture, and streaming proxy mechanisms for the multi-platform media downloader API.
 
 ---
 
-## Features & Core Architecture
+**Base Configuration & Architecture**
 
--   **Multi-Platform Support**: Dedicated endpoints for YouTube, TikTok, Instagram, Facebook, and X (Twitter).
--   **Database Caching (`CachedMedia`)**: Incoming URLs are sanitized and hashed using SHA-256 (`url_hash`). Valid extractions are cached with a 12-hour expiration window to completely eliminate redundant external network requests.
--   **Activity Logging (`DownloadLog`)**: Tracks platform type, original URL, request duration, and operational status (`SUCCESS`, `FAILED`, `PENDING`).
--   **Stream Handling & Merging**: Automatically routes YouTube adaptive video and audio tracks through system-level FFmpeg to stitch high-definition MP4 files on the fly.
--   **Secure Streaming Proxy (`ProxyDownloadView`)**: Server-side proxying that forwards exact headers, supports `Range` requests, and prevents SSRF security exploits.
+-   **Base URL:** `[https://gt-downloads.onrender.com/api/extract/](https://gt-downloads.onrender.com/api/extract/)`
+-   **Framework:** Django (v6.1) & Django REST Framework (DRF)
+-   **Supported Platforms:** TikTok, Instagram, Facebook, X (Twitter), and YouTube.
 
 ---
 
-## API Endpoints Reference
-
-Base URL: `https://gt-downloads.onrender.com/api/`
+**API Endpoints Reference**
 
 ### 1. Platform Extraction Endpoints
 
-All platform extraction endpoints accept an HTTP `POST` request with a JSON payload.
+All platform extraction endpoints accept an HTTP `POST` request with a JSON payload containing the target resource link.
 
-| Endpoint Path               | Platform    | HTTP Method | Description                                                                   |
-| :-------------------------- | :---------- | :---------- | :---------------------------------------------------------------------------- |
+| Endpoint Path             | Platform    | HTTP Method | Description                                                                   |
+| ------------------------- | ----------- | ----------- | ----------------------------------------------------------------------------- |
 | `/api/extract/tiktok/`    | TikTok      | POST        | Extracts TikTok media metadata and returns a proxied stream link.             |
 | `/api/extract/instagram/` | Instagram   | POST        | Resolves direct Instagram media CDN links.                                    |
 | `/api/extract/facebook/`  | Facebook    | POST        | Extracts public Facebook video streams.                                       |
@@ -41,11 +30,10 @@ All platform extraction endpoints accept an HTTP `POST` request with a JSON payl
 
 ```json
 {
-	"url": "[https://www.youtube.com/watch?v=EXAMPLE_ID](https://www.youtube.com/watch?v=EXAMPLE_ID)",
-	
+	"url": "https://www.youtube.com/watch?v=EXAMPLE_ID",
+	"resolution": 720
 }
 ```
-
 
 #### **Successful Extraction Response (`200 OK`)**
 
@@ -53,109 +41,31 @@ All platform extraction endpoints accept an HTTP `POST` request with a JSON payl
 {
 	"url_hash": "a1b2c3d4e5f6...",
 	"platform": "youtube",
-	"original_url": "[https://www.youtube.com/watch?v=EXAMPLE_ID](https://www.youtube.com/watch?v=EXAMPLE_ID)",
+	"original_url": "https://www.youtube.com/watch?v=EXAMPLE_ID",
 	"title": "Sample Video Title",
-	"thumbnail_url": "[https://img.youtube.com/vi/EXAMPLE_ID/hqdefault.jpg](https://img.youtube.com/vi/EXAMPLE_ID/hqdefault.jpg)",
+	"thumbnail_url": "https://img.youtube.com/vi/EXAMPLE_ID/hqdefault.jpg",
 	"duration": 245,
 	"cached": false,
-	"filename": "Sample_Video_Title_gtdownload.mp4",
-	"resolutions": [
-		{
-			"key": "hd",
-			"label": "HD",
-			"resolution": 720,
-			"download_url": "[https://gt-downloads.onrender.com/api/merged-download/?url=...&quality=hd](https://gt-downloads.onrender.com/api/merged-download/?url=...&quality=hd)",
-			"merge_required": true
-		}
-	]
+	"download_url": "https://gt-downloads.onrender.com/api/merged-download/?url=...&quality=hd"
 }
 ```
-<<<<<<< HEAD
-=======
 
+### 2. Management & Monitoring Endpoints
 
-2. Utility & Processing Endpoints
-Proxy Download (GET /api/proxy-download/)
->>>>>>> 758a433e9ee1967827bcd4cb3102a7d1bbe39e93
+-   **Download Logs (`/api/extract/download-logs/`)**
+-   `GET`: Retrieves a list of all recorded extraction logs.
+-   `DELETE`: Wipes all recorded download logs from the database.
 
-### 2. Utility & Processing Endpoints
+-   **Cached Media (`/api/extract/cached-media/`)**
+-   `GET`: Lists all currently cached media records.
+-   `DELETE`: Purges all active database media caches.
 
--   **Proxy Download (`GET /api/proxy-download/`)**
+### 3. Utility & Processing Endpoints
+
+-   **Proxy Download (`/api/proxy-download/`)**
 -   Securely proxies remote CDN resources server-side to prevent CORS blocks and 403 Forbidden restrictions.
 -   **Query Parameters:** `url` (encoded media source) and optional forwarded headers (`h_referer`, `h_user_agent`).
 
--   **Merged Download (`GET /api/merged-download/`)**
+-   **Merged Download (`/api/merged-download/`)**
 -   Triggers FFmpeg execution to stitch separate YouTube video and audio streams into a unified MP4 file.
 -   **Query Parameters:** `url` (target YouTube link) and `quality` (`480` or `hd`).
-
----
-
-## Local Installation & Setup
-
-1. **Clone the Repository**
-
-<<<<<<< HEAD
-```bash
-git clone [https://github.com/GtDownload/gt_downloads.git](https://github.com/GtDownload/gt_downloads.git)
-cd gt_downloads
-
-```
-
-2. **Create & Activate a Virtual Environment**
-
-```bash
-python -m venv .venv
-source .venv/bin/activate  # On Windows use: .venv\Scripts\activate
-
-```
-
-3. **Install Dependencies**
-
-```bash
-pip install -r requirements.txt
-
-```
-
-4. **Apply Database Migrations**
-
-```bash
-python manage.py makemigrations
-python manage.py migrate
-
-```
-
-5. **Run the Development Server**
-
-```bash
-python manage.py runserver
-
-```
-
-```
-
-=======
-```Bash
-git clone [https://github.com/GtDownload/gt_downloads.git](https://github.com/GtDownload/gt_downloads.git)
-cd gt_downloads
-Create & Activate a Virtual Environment
-```
-
-
-```Bash
-python -m venv .venv
-source .venv/bin/activate  # On Windows use: .venv\Scripts\activate
-Install Dependencies
-```
-```Bash
-pip install -r requirements.txt
-Apply Database Migrations
-```
-```Bash
-python manage.py makemigrations
-python manage.py migrate
-Run the Development Server
-```
-```Bash
-python manage.py runserver
->>>>>>> 758a433e9ee1967827bcd4cb3102a7d1bbe39e93
-```
