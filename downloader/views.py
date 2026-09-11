@@ -56,6 +56,19 @@ LOG_STATUS_MAP = {
     "pending": "PENDING",
 }
 
+# ← FIX: The YouTube client list that works best on datacenter IPs (Render, AWS, etc.)
+# "tv" is currently the most reliable. "web_safari" mimics Safari (less fingerprinted).
+# Avoid "default" — it gets bot-blocked instantly on cloud IPs.
+YOUTUBE_PLAYER_CLIENTS = ["tv", "web_safari", "mweb"]
+
+# ← FIX: Optional residential proxy for YouTube. Set YTDLP_YOUTUBE_PROXY in Render
+# env vars to route YouTube requests through a residential IP. Leave blank to skip.
+YOUTUBE_PROXY = os.getenv("YTDLP_YOUTUBE_PROXY", "").strip() or None
+
+# ← FIX: Optional PO Token provider (bgutil). Set YTDLP_PO_TOKEN in Render env vars.
+# Example value: "bgutilhttp:base_url=http://your-provider.onrender.com:4416"
+YOUTUBE_PO_TOKEN = os.getenv("YTDLP_PO_TOKEN", "").strip() or None
+
 
 # ---------------------------------------------------------------------------
 # UTILITY HELPERS
@@ -86,6 +99,9 @@ def forward_format_headers(fmt: dict) -> dict:
 
 class BaseExtractorView(APIView):
     platform_name = "unknown"
+    # ← FIX: Only TikTok uses the shared cookies.txt. Public platforms do NOT
+    # inherit personal cookies, otherwise YouTube gets flagged instantly.
+    uses_cookies = False
 
     def sanitize_url(self, raw_url: str) -> str:
         if "youtube.com" in raw_url or "youtu.be" in raw_url:
@@ -97,6 +113,10 @@ class BaseExtractorView(APIView):
         return raw_url
 
     def get_cookie_file(self) -> str | None:
+        # ← FIX: Block cookie usage on non-TikTok platforms
+        if not self.uses_cookies:
+            return None
+
         value = getattr(settings, "YTDLP_COOKIE_FILE", None)
         if not value:
             return None
@@ -218,7 +238,6 @@ class BaseExtractorView(APIView):
 
             cached_data = CachedMediaSerializer(cached_item).data
 
-            # If it's YouTube, route to merged download, else use proxy url
             if cached_data["platform"] == "youtube":
                 try:
                     merge_path = reverse("merged-download")
@@ -269,7 +288,7 @@ class BaseExtractorView(APIView):
                 merge_path = reverse("merged-download")
             except Exception:
                 merge_path = "/api/merged-download/"
-            
+
             quality_key = "480" if requested_resolution <= 480 else "hd"
             encoded_url = quote(target_url, safe="")
             merged_url = request.build_absolute_uri(
@@ -279,7 +298,6 @@ class BaseExtractorView(APIView):
             request_duration = round(time.time() - start_time, 3)
             self.log_request(target_url, "success", request_duration)
 
-            # Save YouTube info to database cache
             try:
                 CachedMedia.objects.update_or_create(
                     url_hash=url_hash,
@@ -360,7 +378,6 @@ class BaseExtractorView(APIView):
             http_headers=format_headers,
         )
 
-        # Save to database cache with 12 hours expiration
         try:
             CachedMedia.objects.update_or_create(
                 url_hash=url_hash,
@@ -396,7 +413,9 @@ class BaseExtractorView(APIView):
 # ================================================================
 class TikTokExtractorView(BaseExtractorView):
     platform_name = "tiktok"
-    
+    # ← FIX: TikTok NEEDS cookies (tt_chain_token) to bypass the 403
+    uses_cookies = True
+
     def get_ydl_options(self) -> dict:
         opts = super().get_ydl_options()
         opts.update({
@@ -420,6 +439,13 @@ class InstagramExtractorView(BaseExtractorView):
         opts = super().get_ydl_options()
         opts.update({
             "format": "best[height>=720][height<=1080]/best[height>=720]/best",
+            # ← FIX: Instagram CDN blocks non-browser TLS fingerprints
+            "impersonate": ImpersonateTarget.from_str("chrome"),
+            "http_headers": {
+                "User-Agent": USER_AGENT,
+                "Referer": PLATFORM_REFERERS["instagram"],
+                "Accept-Language": "en-US,en;q=0.9",
+            },
         })
         return opts
 
@@ -431,6 +457,16 @@ class FacebookExtractorView(BaseExtractorView):
         opts = super().get_ydl_options()
         opts.update({
             "format": "best[height>=720][height<=1080]/best[height>=720]/best",
+            # ← FIX: Facebook 403s on datacenter IPs without impersonation
+            "impersonate": ImpersonateTarget.from_str("chrome"),
+            # ← FIX: Large files (>500MB) on Facebook return 403 during download.
+            # Forcing 250MB chunks bypasses this bug.
+            "http_chunk_size": 250 * 1024 * 1024,
+            "http_headers": {
+                "User-Agent": USER_AGENT,
+                "Referer": PLATFORM_REFERERS["facebook"],
+                "Accept-Language": "en-US,en;q=0.9",
+            },
         })
         return opts
 
@@ -442,12 +478,20 @@ class TwitterExtractorView(BaseExtractorView):
         opts = super().get_ydl_options()
         opts.update({
             "format": "best[height>=720][height<=1080]/best[height>=720]/best",
+            # ← FIX: Twitter/X CDN checks TLS fingerprint
+            "impersonate": ImpersonateTarget.from_str("chrome"),
+            "http_headers": {
+                "User-Agent": USER_AGENT,
+                "Referer": PLATFORM_REFERERS["twitter"],
+                "Accept-Language": "en-US,en;q=0.9",
+            },
         })
         return opts
-    
+
 
 class YoutubeExtractorView(BaseExtractorView):
     platform_name = "youtube"
+    # Note: YouTube does NOT use cookies. Public endpoint must not share personal cookies.
 
     def get_ydl_options(self) -> dict:
         opts = super().get_ydl_options()
@@ -459,10 +503,20 @@ class YoutubeExtractorView(BaseExtractorView):
             "merge_output_format": "mp4",
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["ios", "android", "mweb"],
+                    # ← FIX: This is the critical change for production
+                    "player_client": YOUTUBE_PLAYER_CLIENTS,
                 }
             },
         })
+
+        # ← FIX: Route YouTube through a residential proxy if configured
+        if YOUTUBE_PROXY:
+            opts["proxy"] = YOUTUBE_PROXY
+
+        # ← FIX: Attach PO Token if configured
+        if YOUTUBE_PO_TOKEN:
+            opts["extractor_args"]["youtube"]["po_token"] = YOUTUBE_PO_TOKEN
+
         return opts
 
 
@@ -500,14 +554,24 @@ class MergedDownloadView(APIView):
             },
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["ios", "android", "mweb"],
+                    # ← FIX: Same client list as YoutubeExtractorView
+                    "player_client": YOUTUBE_PLAYER_CLIENTS,
                 }
             },
         }
 
-        cookie_file = BaseExtractorView().get_cookie_file()
-        if cookie_file:
-            ydl_opts["cookiefile"] = cookie_file
+        # ← FIX: DO NOT pass cookiefile here. YouTube is a public endpoint and
+        # passing TikTok cookies (or any personal cookies) causes instant
+        # "Sign in to confirm you're not a bot" blocks.
+        # Cookies are for TikTok only.
+
+        # ← FIX: Apply residential proxy if configured
+        if YOUTUBE_PROXY:
+            ydl_opts["proxy"] = YOUTUBE_PROXY
+
+        # ← FIX: Apply PO Token if configured
+        if YOUTUBE_PO_TOKEN:
+            ydl_opts["extractor_args"]["youtube"]["po_token"] = YOUTUBE_PO_TOKEN
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -546,9 +610,19 @@ class MergedDownloadView(APIView):
 
         except Exception as exc:
             shutil.rmtree(temp_dir, ignore_errors=True)
-            return HttpResponse(f"Error processing video stream: {exc}", status=500)
-    
-    
+            error_text = str(exc).strip() or type(exc).__name__
+
+            # ← FIX: Provide a clearer production error message
+            if "Sign in to confirm you're not a bot" in error_text:
+                return HttpResponse(
+                    "YouTube blocked this server request. Configure YTDLP_YOUTUBE_PROXY "
+                    "or YTDLP_PO_TOKEN on Render to bypass bot detection.",
+                    status=503,
+                )
+
+            return HttpResponse(f"Error processing video stream: {error_text}", status=500)
+
+
 # ================================================================
 # PROXY DOWNLOAD VIEW
 # ================================================================
