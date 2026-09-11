@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from yt_dlp.networking.impersonate import ImpersonateTarget
 
 import requests
+from curl_cffi import requests as curl_requests  # ← ADDED for TikTok CDN fetch
 import yt_dlp
 from django.conf import settings
 from django.http import FileResponse, HttpResponse, StreamingHttpResponse
@@ -18,6 +19,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.decorators import api_view
 
 from .models import CachedMedia, DownloadLog
 from .serializers import (
@@ -56,17 +58,13 @@ LOG_STATUS_MAP = {
     "pending": "PENDING",
 }
 
-# ← FIX: The YouTube client list that works best on datacenter IPs (Render, AWS, etc.)
-# "tv" is currently the most reliable. "web_safari" mimics Safari (less fingerprinted).
-# Avoid "default" — it gets bot-blocked instantly on cloud IPs.
+# YouTube clients that work best on datacenter IPs (Render, AWS, etc.)
 YOUTUBE_PLAYER_CLIENTS = ["tv", "web_safari", "mweb"]
 
-# ← FIX: Optional residential proxy for YouTube. Set YTDLP_YOUTUBE_PROXY in Render
-# env vars to route YouTube requests through a residential IP. Leave blank to skip.
+# Optional residential proxy for YouTube (set YTDLP_YOUTUBE_PROXY on Render)
 YOUTUBE_PROXY = os.getenv("YTDLP_YOUTUBE_PROXY", "").strip() or None
 
-# ← FIX: Optional PO Token provider (bgutil). Set YTDLP_PO_TOKEN in Render env vars.
-# Example value: "bgutilhttp:base_url=http://your-provider.onrender.com:4416"
+# Optional PO Token provider (set YTDLP_PO_TOKEN on Render)
 YOUTUBE_PO_TOKEN = os.getenv("YTDLP_PO_TOKEN", "").strip() or None
 
 
@@ -93,14 +91,36 @@ def forward_format_headers(fmt: dict) -> dict:
     return {k: v for k, v in headers.items() if k in allowed and v}
 
 
+def parse_tiktok_cookies(cookie_file: str) -> str:
+    """
+    Read a Netscape cookie file and return only tiktok.com cookies
+    as a single Cookie header string. Returns "" if nothing found.
+    """
+    if not cookie_file or not os.path.isfile(cookie_file):
+        return ""
+    cookie_pairs = []
+    try:
+        with open(cookie_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) >= 7:
+                    domain, _, path, secure, expires, name, value = parts[:7]
+                    if "tiktok.com" in domain:
+                        cookie_pairs.append(f"{name}={value}")
+    except Exception as e:
+        print("Cookie parse error:", e)
+    return "; ".join(cookie_pairs)
+
+
 # ---------------------------------------------------------------------------
 # BASE EXTRACTOR VIEW
 # ---------------------------------------------------------------------------
 
 class BaseExtractorView(APIView):
     platform_name = "unknown"
-    # ← FIX: Only TikTok uses the shared cookies.txt. Public platforms do NOT
-    # inherit personal cookies, otherwise YouTube gets flagged instantly.
     uses_cookies = False
 
     def sanitize_url(self, raw_url: str) -> str:
@@ -113,7 +133,6 @@ class BaseExtractorView(APIView):
         return raw_url
 
     def get_cookie_file(self) -> str | None:
-        # ← FIX: Block cookie usage on non-TikTok platforms
         if not self.uses_cookies:
             return None
 
@@ -413,13 +432,15 @@ class BaseExtractorView(APIView):
 # ================================================================
 class TikTokExtractorView(BaseExtractorView):
     platform_name = "tiktok"
-    # ← FIX: TikTok NEEDS cookies (tt_chain_token) to bypass the 403
     uses_cookies = True
 
     def get_ydl_options(self) -> dict:
         opts = super().get_ydl_options()
         opts.update({
-            "format": "best[height>=720]/best",
+            # Match the terminal test that succeeded — allow separate video/audio streams
+            "format": "bestvideo*+bestaudio/best",
+            "format_sort": ["res:1080", "ext:mp4:m4a"],
+            "merge_output_format": "mp4",
             "impersonate": ImpersonateTarget.from_str("chrome"),
             "geo_bypass": True,
             "geo_bypass_country": "US",
@@ -439,7 +460,6 @@ class InstagramExtractorView(BaseExtractorView):
         opts = super().get_ydl_options()
         opts.update({
             "format": "best[height>=720][height<=1080]/best[height>=720]/best",
-            # ← FIX: Instagram CDN blocks non-browser TLS fingerprints
             "impersonate": ImpersonateTarget.from_str("chrome"),
             "http_headers": {
                 "User-Agent": USER_AGENT,
@@ -457,10 +477,8 @@ class FacebookExtractorView(BaseExtractorView):
         opts = super().get_ydl_options()
         opts.update({
             "format": "best[height>=720][height<=1080]/best[height>=720]/best",
-            # ← FIX: Facebook 403s on datacenter IPs without impersonation
             "impersonate": ImpersonateTarget.from_str("chrome"),
-            # ← FIX: Large files (>500MB) on Facebook return 403 during download.
-            # Forcing 250MB chunks bypasses this bug.
+            # Prevents 403 on large (>500MB) Facebook files
             "http_chunk_size": 250 * 1024 * 1024,
             "http_headers": {
                 "User-Agent": USER_AGENT,
@@ -478,7 +496,6 @@ class TwitterExtractorView(BaseExtractorView):
         opts = super().get_ydl_options()
         opts.update({
             "format": "best[height>=720][height<=1080]/best[height>=720]/best",
-            # ← FIX: Twitter/X CDN checks TLS fingerprint
             "impersonate": ImpersonateTarget.from_str("chrome"),
             "http_headers": {
                 "User-Agent": USER_AGENT,
@@ -491,7 +508,6 @@ class TwitterExtractorView(BaseExtractorView):
 
 class YoutubeExtractorView(BaseExtractorView):
     platform_name = "youtube"
-    # Note: YouTube does NOT use cookies. Public endpoint must not share personal cookies.
 
     def get_ydl_options(self) -> dict:
         opts = super().get_ydl_options()
@@ -503,17 +519,14 @@ class YoutubeExtractorView(BaseExtractorView):
             "merge_output_format": "mp4",
             "extractor_args": {
                 "youtube": {
-                    # ← FIX: This is the critical change for production
                     "player_client": YOUTUBE_PLAYER_CLIENTS,
                 }
             },
         })
 
-        # ← FIX: Route YouTube through a residential proxy if configured
         if YOUTUBE_PROXY:
             opts["proxy"] = YOUTUBE_PROXY
 
-        # ← FIX: Attach PO Token if configured
         if YOUTUBE_PO_TOKEN:
             opts["extractor_args"]["youtube"]["po_token"] = YOUTUBE_PO_TOKEN
 
@@ -554,22 +567,16 @@ class MergedDownloadView(APIView):
             },
             "extractor_args": {
                 "youtube": {
-                    # ← FIX: Same client list as YoutubeExtractorView
                     "player_client": YOUTUBE_PLAYER_CLIENTS,
                 }
             },
         }
 
-        # ← FIX: DO NOT pass cookiefile here. YouTube is a public endpoint and
-        # passing TikTok cookies (or any personal cookies) causes instant
-        # "Sign in to confirm you're not a bot" blocks.
-        # Cookies are for TikTok only.
+        # NOTE: Do NOT pass cookiefile here. YouTube is public; cookies cause blocks.
 
-        # ← FIX: Apply residential proxy if configured
         if YOUTUBE_PROXY:
             ydl_opts["proxy"] = YOUTUBE_PROXY
 
-        # ← FIX: Apply PO Token if configured
         if YOUTUBE_PO_TOKEN:
             ydl_opts["extractor_args"]["youtube"]["po_token"] = YOUTUBE_PO_TOKEN
 
@@ -612,7 +619,6 @@ class MergedDownloadView(APIView):
             shutil.rmtree(temp_dir, ignore_errors=True)
             error_text = str(exc).strip() or type(exc).__name__
 
-            # ← FIX: Provide a clearer production error message
             if "Sign in to confirm you're not a bot" in error_text:
                 return HttpResponse(
                     "YouTube blocked this server request. Configure YTDLP_YOUTUBE_PROXY "
@@ -626,7 +632,8 @@ class MergedDownloadView(APIView):
 # ================================================================
 # PROXY DOWNLOAD VIEW
 # ================================================================
-class ProxyDownloadView(APIView):
+class ProxyDownloadView(APIView):    
+    
     def get(self, request):
         token = request.query_params.get("token")
         if not token:
@@ -666,18 +673,35 @@ class ProxyDownloadView(APIView):
 
         headers.update(extra_headers)
 
+        # ← TikTok: inject cookies from cookies.txt into the CDN request
+        if platform == "tiktok":
+            cookie_header = parse_tiktok_cookies(BaseExtractorView().get_cookie_file())
+            if cookie_header:
+                headers["Cookie"] = cookie_header
+
         client_range = request.headers.get("Range")
         if client_range:
             headers["Range"] = client_range
 
         try:
-            response = requests.get(
-                video_url,
-                headers=headers,
-                stream=True,
-                timeout=60,
-                allow_redirects=True,
-            )
+            # ← TikTok: use curl_cffi so the CDN sees a real Chrome TLS fingerprint
+            if platform == "tiktok" or "tiktok" in video_url.lower() or "muscdn" in video_url.lower():
+                response = curl_requests.get(
+                    video_url,
+                    headers=headers,
+                    impersonate="chrome",
+                    stream=True,
+                    timeout=60,
+                    allow_redirects=True,
+                )
+            else:
+                response = requests.get(
+                    video_url,
+                    headers=headers,
+                    stream=True,
+                    timeout=60,
+                    allow_redirects=True,
+                )
 
             if response.status_code not in (200, 206):
                 response.close()
@@ -740,3 +764,39 @@ class ProxyDownloadView(APIView):
             return HttpResponse(f"Error fetching video: {str(e)}", status=500)
         except Exception as e:
             return HttpResponse(f"Unexpected error: {str(e)}", status=500)
+        
+
+
+class get_download_log(APIView):
+    def get(self, request):
+        logs = DownloadLog.objects.all()
+        serializer = DownloadLogSerializer(logs, many=True )
+    
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    
+    def delete(self, request):
+        deleted_count, deletion_details = DownloadLog.objects.all().delete()
+        
+        return Response(
+            {"message": f"Successfully deleted {deleted_count} logs."}, 
+            status=status.HTTP_200_OK
+        )
+
+
+class get_cached_media(APIView):
+    def get(self, request):
+        logs = CachedMedia.objects.all()
+        serializer = DownloadLogSerializer(logs, many=True )
+    
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    
+    def delete(self, request):
+        deleted_count, deletion_details = CachedMedia.objects.all().delete()
+        
+        return Response(
+            {"message": f"Successfully deleted {deleted_count} cached url."}, 
+            status=status.HTTP_200_OK
+        )
+        

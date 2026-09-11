@@ -25,3 +25,6 @@ class CachedMediaSerializer(serializers.ModelSerializer):
     class Meta:
         model = CachedMedia
         fields = '__all__'
+        
+        
+        

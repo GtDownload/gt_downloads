@@ -7,6 +7,8 @@ from .views import (
     YoutubeExtractorView,
     ProxyDownloadView,
     MergedDownloadView,
+    get_download_log,
+    get_cached_media
 )
 
 urlpatterns = [
@@ -17,4 +19,6 @@ urlpatterns = [
     path('youtube/', YoutubeExtractorView.as_view(), name='youtube-extractor'),
     path('proxy-download/', ProxyDownloadView.as_view(), name='proxy-download'),
     path('merged-download/', MergedDownloadView.as_view(), name='merged-download'),
+    path('download-logs/', get_download_log.as_view(), name="download-logs" ),
+    path('cached-media/', get_cached_media.as_view(), name="cached-media" )
 ]
